@@ -14,10 +14,21 @@ def test_music_bot_initialization():
 @pytest.mark.asyncio
 async def test_music_bot_setup_hook():
     config = BotConfig(token="fake_token", prefix="!", ffmpeg_path="ffmpeg", default_volume=0.5)
-    bot = MusicBot(config)
+    bot = MusicBot(config, application_id=123456789)
 
     with patch.object(bot, "load_extension", new_callable=AsyncMock) as mock_load, \
          patch.object(bot.tree, "sync", new_callable=AsyncMock) as mock_sync:
         await bot.setup_hook()
         mock_load.assert_called_once_with("src.cogs.music")
         mock_sync.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_music_bot_setup_hook_without_application_id():
+    config = BotConfig(token="fake_token", prefix="!", ffmpeg_path="ffmpeg", default_volume=0.5)
+    bot = MusicBot(config, application_id=None)
+
+    with patch.object(bot, "load_extension", new_callable=AsyncMock) as mock_load, \
+         patch.object(bot.tree, "sync", new_callable=AsyncMock) as mock_sync:
+        await bot.setup_hook()
+        mock_load.assert_called_once_with("src.cogs.music")
+        mock_sync.assert_not_called()

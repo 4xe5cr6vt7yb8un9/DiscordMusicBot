@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class MusicBot(commands.Bot):
     """Custom commands.Bot instance pre-configured for voice playback and slash commands."""
 
-    def __init__(self, config: BotConfig) -> None:
+    def __init__(self, config: BotConfig, application_id: int | None = None) -> None:
         self.bot_config = config
 
         intents = discord.Intents.default()
@@ -23,6 +23,7 @@ class MusicBot(commands.Bot):
             command_prefix=config.prefix,
             intents=intents,
             help_command=commands.DefaultHelpCommand(),
+            application_id=application_id,
         )
 
     async def setup_hook(self) -> None:
@@ -30,12 +31,15 @@ class MusicBot(commands.Bot):
         logger.info("Loading Music extension...")
         await self.load_extension("src.cogs.music")
 
-        logger.info("Synchronizing application slash commands with Discord...")
-        try:
-            synced = await self.tree.sync()
-            logger.info("Successfully synced %d application command(s).", len(synced))
-        except Exception as err:
-            logger.error("Failed to sync application commands: %s", err)
+        # Synchronize slash commands if application_id is established
+        if self.application_id:
+            try:
+                synced = await self.tree.sync()
+                logger.info("Successfully synced %d application command(s).", len(synced))
+            except Exception as err:
+                logger.error("Failed to sync application commands: %s", err)
+        else:
+            logger.debug("Application ID not yet available; slash commands will sync upon login.")
 
     async def on_ready(self) -> None:
         """Lifecycle event triggered when bot connects and is ready."""
