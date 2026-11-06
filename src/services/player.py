@@ -8,7 +8,7 @@ import logging
 from typing import Any
 import discord
 
-from src.models.song import Song
+from src.models.song import RepeatMode, Song
 from src.services.ytdl import YouTubeExtractor
 
 logger = logging.getLogger(__name__)
@@ -23,12 +23,20 @@ class GuildMusicPlayer:
         default_volume: float = 0.5,
         on_track_start: Callable[[Song], Coroutine[Any, Any, None]] | None = None,
         on_disconnect: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        on_error: Callable[[Song, Exception], Coroutine[Any, Any, None]] | None = None,
+        bound_channel: discord.abc.Messageable | None = None,
     ) -> None:
         self.voice_client = voice_client
         self.ffmpeg_path = ffmpeg_path
         self._volume = default_volume
         self.on_track_start = on_track_start
         self.on_disconnect = on_disconnect
+        self.on_error = on_error
+        self.bound_channel = bound_channel
+
+        self.repeat_mode: RepeatMode = RepeatMode.OFF
+        self._skip_requested: bool = False
+        self._last_error: Exception | None = None
 
         self._queue: deque[Song] = deque()
         self.current_song: Song | None = None
@@ -74,6 +82,29 @@ class GuildMusicPlayer:
         if self._audio_source is not None:
             self._audio_source.volume = self._volume
 
+    def toggle_repeat_mode(self, mode: str | None = None) -> RepeatMode:
+        """Toggle or explicitly set the repeat mode ('off', 'song', 'queue')."""
+        if mode:
+            cleaned = mode.lower().strip()
+            if cleaned in ("song", "track", "one", "current"):
+                self.repeat_mode = RepeatMode.SONG
+            elif cleaned in ("queue", "all"):
+                self.repeat_mode = RepeatMode.QUEUE
+            elif cleaned in ("off", "none", "disable", "stop"):
+                self.repeat_mode = RepeatMode.OFF
+            else:
+                raise ValueError("Invalid repeat mode. Please choose 'off', 'song', or 'queue'.")
+        else:
+            if self.repeat_mode == RepeatMode.OFF:
+                self.repeat_mode = RepeatMode.SONG
+            elif self.repeat_mode == RepeatMode.SONG:
+                self.repeat_mode = RepeatMode.QUEUE
+            else:
+                self.repeat_mode = RepeatMode.OFF
+
+        logger.info("Repeat mode updated to: %s", self.repeat_mode.value)
+        return self.repeat_mode
+
     async def enqueue(self, song: Song) -> None:
         """Add a song to the guild queue."""
         self._ensure_player_task()
@@ -100,6 +131,7 @@ class GuildMusicPlayer:
         """Skip the currently playing track."""
         if self.voice_client.is_playing() or self.voice_client.is_paused():
             logger.info("Skipping track: %s", self.current_song.title if self.current_song else "unknown")
+            self._skip_requested = True
             self.voice_client.stop()
             self._track_finished.set()
             return True
@@ -109,6 +141,7 @@ class GuildMusicPlayer:
         """Stop playback and clear all queued tracks."""
         self._queue.clear()
         self.current_song = None
+        self._skip_requested = False
         if self.voice_client.is_playing() or self.voice_client.is_paused():
             self.voice_client.stop()
         self._track_finished.set()
@@ -123,8 +156,9 @@ class GuildMusicPlayer:
 
     def _play_next_callback(self, error: Exception | None) -> None:
         """Callback invoked by discord.py in AudioPlayer worker thread when audio track completes or errors."""
+        self._last_error = error
         if error:
-            logger.error("Audio playback error: %s", error, exc_info=error)
+            logger.error("Audio playback error encountered: %s", error, exc_info=error)
         else:
             logger.info("Audio track finished playing successfully.")
 
@@ -152,6 +186,7 @@ class GuildMusicPlayer:
 
             self.current_song = self._queue.popleft()
             self._track_finished.clear()
+            self._last_error = None
 
             try:
                 self._audio_source = YouTubeExtractor.create_audio_source(
@@ -166,6 +201,23 @@ class GuildMusicPlayer:
 
             except Exception as err:
                 logger.error("Failed to start playback for %s: %s", self.current_song.title, err, exc_info=True)
+                self._last_error = err
                 self._track_finished.set()
 
             await self._track_finished.wait()
+
+            # If an error occurred (either at startup or during playback), notify user
+            if self._last_error and self.on_error and self.current_song:
+                try:
+                    await self.on_error(self.current_song, self._last_error)
+                except Exception as callback_err:
+                    logger.warning("Error running on_error callback: %s", callback_err)
+
+            # Handle repeat mode
+            if self._skip_requested:
+                self._skip_requested = False
+            elif not self._last_error and self.current_song:
+                if self.repeat_mode == RepeatMode.SONG:
+                    self._queue.appendleft(self.current_song)
+                elif self.repeat_mode == RepeatMode.QUEUE:
+                    self._queue.append(self.current_song)

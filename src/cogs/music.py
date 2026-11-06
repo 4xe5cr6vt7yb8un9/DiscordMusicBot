@@ -8,7 +8,7 @@ from discord.ext import commands
 
 from src.config import BotConfig
 from src.errors import AudioExtractionError
-from src.models.song import Song
+from src.models.song import RepeatMode, Song
 from src.services.player import GuildMusicPlayer
 from src.services.ytdl import YouTubeExtractor
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 class MusicCog(commands.Cog, name="Music"):
-    """Music playback commands: play, pause, resume, skip, stop, queue, volume, leave."""
+    """Music playback commands: play, pause, resume, skip, stop, queue, repeat, volume, leave."""
 
     def __init__(self, bot: commands.Bot, config: BotConfig) -> None:
         self.bot = bot
@@ -31,16 +31,28 @@ class MusicCog(commands.Cog, name="Music"):
         guild_id = ctx.guild.id
         if guild_id not in self.players or self.players[guild_id].voice_client != voice_client:
             async def on_track_start(song: Song) -> None:
+                player = self.players.get(guild_id)
+                channel = player.bound_channel if (player and player.bound_channel) else ctx.channel
                 embed = song.create_embed(status="Now Playing")
                 try:
-                    await ctx.send(embed=embed)
+                    await channel.send(embed=embed)
                 except Exception as err:
-                    logger.warning("Failed to send now playing message: %s", err)
+                    logger.warning("Failed to send now playing message to channel: %s", err)
+
+            async def on_error(song: Song, error: Exception) -> None:
+                player = self.players.get(guild_id)
+                channel = player.bound_channel if (player and player.bound_channel) else ctx.channel
+                try:
+                    await channel.send(f"❌ An error occurred while attempting to play **{song.title}**: {error}")
+                except Exception as err:
+                    logger.warning("Failed to send playback error message: %s", err)
 
             async def on_disconnect() -> None:
+                player = self.players.get(guild_id)
+                channel = player.bound_channel if (player and player.bound_channel) else ctx.channel
                 await self.cleanup_player(guild_id)
                 try:
-                    await ctx.send("🔇 Inactive for 3 minutes. Disconnected from voice channel.")
+                    await channel.send("🔇 Inactive for 3 minutes. Disconnected from voice channel.")
                 except Exception:
                     pass
 
@@ -50,8 +62,13 @@ class MusicCog(commands.Cog, name="Music"):
                 default_volume=self.config.default_volume,
                 on_track_start=on_track_start,
                 on_disconnect=on_disconnect,
+                on_error=on_error,
+                bound_channel=ctx.channel,
             )
-        return self.players[guild_id]
+
+        player = self.players[guild_id]
+        player.bound_channel = ctx.channel
+        return player
 
     async def cleanup_player(self, guild_id: int) -> None:
         """Clean up player resources and disconnect voice client."""
@@ -75,7 +92,6 @@ class MusicCog(commands.Cog, name="Music"):
         voice_client: discord.VoiceClient | None = ctx.guild.voice_client
         if voice_client is None:
             voice_client = await target_channel.connect()
-            # Allow voice gateway and encryption handshake to settle
             import asyncio
             await asyncio.sleep(0.5)
         elif voice_client.channel != target_channel:
@@ -84,10 +100,15 @@ class MusicCog(commands.Cog, name="Music"):
         try:
             song = await self.extractor.extract_song(query, ctx.author)
         except AudioExtractionError as err:
-            await ctx.send(f"❌ Error: {err}")
+            await ctx.send(f"❌ Could not extract audio: {err}")
+            return
+        except Exception as err:
+            logger.error("Unexpected error extracting song '%s': %s", query, err, exc_info=True)
+            await ctx.send(f"❌ An unexpected error occurred while preparing audio: {err}")
             return
 
         player = self.get_player(ctx, voice_client)
+        player.bound_channel = ctx.channel
         is_currently_playing = player.is_playing or player.current_song is not None
         await player.enqueue(song)
 
@@ -103,6 +124,7 @@ class MusicCog(commands.Cog, name="Music"):
             await ctx.send("❌ Nothing is currently playing.")
             return
 
+        player.bound_channel = ctx.channel
         if player.pause():
             await ctx.send("⏸️ Playback paused.")
         else:
@@ -116,6 +138,7 @@ class MusicCog(commands.Cog, name="Music"):
             await ctx.send("❌ Audio is not currently paused.")
             return
 
+        player.bound_channel = ctx.channel
         if player.resume():
             await ctx.send("▶️ Playback resumed.")
         else:
@@ -129,6 +152,7 @@ class MusicCog(commands.Cog, name="Music"):
             await ctx.send("❌ Nothing is currently playing to skip.")
             return
 
+        player.bound_channel = ctx.channel
         player.skip()
         await ctx.send("⏭️ Skipped current track.")
 
@@ -140,8 +164,35 @@ class MusicCog(commands.Cog, name="Music"):
             await ctx.send("❌ Bot is not playing music.")
             return
 
+        player.bound_channel = ctx.channel
         player.stop()
         await ctx.send("⏹️ Stopped playback and cleared queue.")
+
+    @commands.hybrid_command(
+        name="repeat",
+        aliases=["loop"],
+        description="Toggle or set repeat mode: off, song, or queue."
+    )
+    async def repeat(self, ctx: Context, mode: str | None = None) -> None:
+        """Toggle or set repeating for the current song or entire queue."""
+        player = self.players.get(ctx.guild.id)
+        if not player:
+            await ctx.send("❌ Bot is not active in a voice channel.")
+            return
+
+        player.bound_channel = ctx.channel
+        try:
+            new_mode = player.toggle_repeat_mode(mode)
+        except ValueError as err:
+            await ctx.send(f"❌ {err}")
+            return
+
+        if new_mode == RepeatMode.SONG:
+            await ctx.send("🔂 Repeat mode set to: **Current Song** (looping this song).")
+        elif new_mode == RepeatMode.QUEUE:
+            await ctx.send("🔁 Repeat mode set to: **Entire Queue** (looping all songs).")
+        else:
+            await ctx.send("➡️ Repeat mode set to: **Off**.")
 
     @commands.hybrid_command(name="queue", description="Display currently queued songs.")
     async def queue(self, ctx: Context) -> None:
@@ -151,9 +202,11 @@ class MusicCog(commands.Cog, name="Music"):
             await ctx.send("📭 The queue is currently empty.")
             return
 
+        player.bound_channel = ctx.channel
         lines: list[str] = []
         if player.current_song:
-            lines.append(f"**Now Playing:** [{player.current_song.title}]({player.current_song.webpage_url}) (`{player.current_song.formatted_duration}`)")
+            repeat_tag = " [🔂 Loop]" if player.repeat_mode == RepeatMode.SONG else ""
+            lines.append(f"**Now Playing:** [{player.current_song.title}]({player.current_song.webpage_url}) (`{player.current_song.formatted_duration}`){repeat_tag}")
 
         if player.queue:
             lines.append("\n**Up Next:**")
@@ -167,6 +220,7 @@ class MusicCog(commands.Cog, name="Music"):
             description="\n".join(lines),
             color=discord.Color.gold(),
         )
+        embed.set_footer(text=f"Repeat: {player.repeat_mode.value.capitalize()} • Volume: {int(player.volume * 100)}%")
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="nowplaying", aliases=["np"], description="Show information about the current song.")
@@ -177,6 +231,7 @@ class MusicCog(commands.Cog, name="Music"):
             await ctx.send("❌ Nothing is currently playing.")
             return
 
+        player.bound_channel = ctx.channel
         await ctx.send(embed=player.current_song.create_embed(status="Now Playing"))
 
     @commands.hybrid_command(name="volume", description="Adjust playback volume (1-150%).")
@@ -191,6 +246,7 @@ class MusicCog(commands.Cog, name="Music"):
             await ctx.send("❌ Bot is not currently active in a voice channel.")
             return
 
+        player.bound_channel = ctx.channel
         player.set_volume(percent / 100.0)
         await ctx.send(f"🔊 Volume set to {percent}%.")
 
@@ -203,6 +259,17 @@ class MusicCog(commands.Cog, name="Music"):
 
         await self.cleanup_player(ctx.guild.id)
         await ctx.send("👋 Disconnected from voice channel.")
+
+    async def cog_command_error(self, ctx: Context, error: Exception) -> None:
+        """Handle errors raised during cog command execution and respond to user."""
+        logger.error("Error executing command '%s': %s", ctx.command, error, exc_info=error)
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send(f"❌ Missing argument: `{error.param.name}`. Use `{self.config.prefix}help {ctx.command}` for usage.")
+        elif isinstance(error, commands.BadArgument):
+            await ctx.send(f"❌ Invalid argument: {error}")
+        else:
+            orig_error = getattr(error, "original", error)
+            await ctx.send(f"❌ An error occurred: {orig_error}")
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -2,7 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import discord
+
+class RepeatMode(str, Enum):
+    """Repeat modes for guild music playback."""
+    OFF = "off"
+    SONG = "song"
+    QUEUE = "queue"
 
 @dataclass(slots=True)
 class Song:

@@ -7,8 +7,9 @@ A modern, high-performance Discord music bot built with **Python 3.10+**, **disc
 - 🎧 **YouTube Streaming**: Stream any YouTube URL or search query using `yt-dlp` and `ffmpeg`.
 - ⚡ **Non-Blocking Architecture**: Extracts audio in separate executor threads to prevent Discord heartbeat lag.
 - 💬 **Hybrid Commands**: Every command works both as a modern Discord Slash Command (`/play`) and as a Prefix command (`!play`).
-- 📜 **Queue System**: Add multiple tracks, view upcoming songs, skip tracks, and inspect current playback.
-- 🎚️ **Playback Controls**: Pause, resume, stop, skip, volume adjustment, and leave.
+- 📜 **Queue & Repeat System**: Add multiple tracks, view upcoming songs, skip tracks, and repeat single songs or the whole queue.
+- 🎚️ **Playback Controls**: Pause, resume, stop, skip, repeat modes, volume adjustment, and leave.
+- 💬 **Dynamic Channel Routing**: Bot always replies and sends playback updates to the text channel where commands were invoked.
 - 🔌 **Auto-Disconnect**: Leaves voice channels after 3 minutes of inactivity to save server bandwidth.
 - 🔒 **Secure Secrets**: Managed through `.env` with strict type validation.
 
@@ -108,5 +109,6 @@ The repository includes a GitHub Actions workflow in `.github/workflows/docker-b
 | `!stop` | `/stop` | Stops playback and clears the queue |
 | `!queue` | `/queue` | Shows currently playing and up to 10 queued songs |
 | `!nowplaying` (`!np`) | `/nowplaying` | Displays rich embed of current playing song |
+| `!repeat [off\|song\|queue]` (`!loop`) | `/repeat [mode]` | Toggles or sets repeat mode (`off`, `song`, or `queue`) |
 | `!volume <1-150>` | `/volume <percent>` | Adjusts volume percentage |
 | `!leave` (`!dc`) | `/leave` | Leaves the voice channel and resets state |

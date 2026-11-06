@@ -3,7 +3,7 @@ import pytest
 import discord
 
 from src.services.player import GuildMusicPlayer
-from src.models.song import Song
+from src.models.song import RepeatMode, Song
 
 @pytest.fixture
 def mock_voice_client():
@@ -46,7 +46,6 @@ async def test_player_enqueue_and_play(mock_voice_client, sample_song):
         mock_create_src.return_value = mock_source
 
         await player.enqueue(sample_song)
-        # Give asyncio loop a slice to trigger playback worker
         import asyncio
         await asyncio.sleep(0.05)
 
@@ -87,6 +86,7 @@ async def test_player_skip_and_stop(mock_voice_client, sample_song):
     player.current_song = sample_song
 
     assert player.skip() is True
+    assert player._skip_requested is True
     mock_voice_client.stop.assert_called_once()
 
     player.stop()
@@ -103,4 +103,49 @@ def test_player_set_volume(mock_voice_client):
     )
     player.set_volume(0.8)
     assert player.volume == 0.8
+    player.destroy()
+
+def test_player_repeat_modes(mock_voice_client):
+    player = GuildMusicPlayer(
+        voice_client=mock_voice_client,
+        ffmpeg_path="ffmpeg",
+        default_volume=0.5,
+    )
+    assert player.repeat_mode == RepeatMode.OFF
+
+    # Test cycling
+    assert player.toggle_repeat_mode() == RepeatMode.SONG
+    assert player.toggle_repeat_mode() == RepeatMode.QUEUE
+    assert player.toggle_repeat_mode() == RepeatMode.OFF
+
+    # Test explicit setting
+    assert player.toggle_repeat_mode("song") == RepeatMode.SONG
+    assert player.toggle_repeat_mode("queue") == RepeatMode.QUEUE
+    assert player.toggle_repeat_mode("off") == RepeatMode.OFF
+
+    with pytest.raises(ValueError):
+        player.toggle_repeat_mode("invalid_mode")
+
+    player.destroy()
+
+@pytest.mark.asyncio
+async def test_player_on_error_callback(mock_voice_client, sample_song):
+    on_error_callback = AsyncMock()
+    player = GuildMusicPlayer(
+        voice_client=mock_voice_client,
+        ffmpeg_path="ffmpeg",
+        default_volume=0.5,
+        on_error=on_error_callback,
+    )
+
+    with patch("src.services.ytdl.YouTubeExtractor.create_audio_source", side_effect=Exception("FFmpeg missing")):
+        await player.enqueue(sample_song)
+        import asyncio
+        await asyncio.sleep(0.05)
+
+        on_error_callback.assert_called_once()
+        args = on_error_callback.call_args[0]
+        assert args[0] == sample_song
+        assert "FFmpeg missing" in str(args[1])
+
     player.destroy()

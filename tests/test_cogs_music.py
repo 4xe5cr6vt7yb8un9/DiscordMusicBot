@@ -5,7 +5,8 @@ from discord.ext import commands
 
 from src.cogs.music import MusicCog
 from src.config import BotConfig
-from src.models.song import Song
+from src.models.song import RepeatMode, Song
+from src.errors import AudioExtractionError
 
 @pytest.fixture
 def bot_mock():
@@ -29,6 +30,11 @@ def ctx_mock():
     ctx.guild = MagicMock(spec=discord.Guild)
     ctx.guild.id = 12345
     ctx.guild.voice_client = None
+
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 55555
+    channel.send = AsyncMock()
+    ctx.channel = channel
 
     author = MagicMock(spec=discord.Member)
     author.voice = MagicMock()
@@ -83,3 +89,28 @@ async def test_play_command_joins_vc_and_enqueues(bot_mock, config_mock, ctx_moc
         ctx_mock.send.assert_called_once()
         _, kwargs = ctx_mock.send.call_args
         assert "embed" in kwargs
+        assert mock_player_instance.bound_channel == ctx_mock.channel
+
+@pytest.mark.asyncio
+async def test_play_command_extraction_error_notifies_channel(bot_mock, config_mock, ctx_mock):
+    cog = MusicCog(bot_mock, config_mock)
+    mock_vc = MagicMock(spec=discord.VoiceClient)
+    ctx_mock.author.voice.channel.connect = AsyncMock(return_value=mock_vc)
+
+    with patch.object(cog.extractor, "extract_song", new_callable=AsyncMock, side_effect=AudioExtractionError("Video is private")):
+        await cog.play.callback(cog, ctx_mock, query="https://youtube.com/watch?v=private")
+        ctx_mock.send.assert_called_once()
+        assert "Could not extract audio" in ctx_mock.send.call_args[0][0]
+
+@pytest.mark.asyncio
+async def test_repeat_command(bot_mock, config_mock, ctx_mock):
+    cog = MusicCog(bot_mock, config_mock)
+    mock_player = MagicMock()
+    mock_player.toggle_repeat_mode.return_value = RepeatMode.SONG
+    cog.players[ctx_mock.guild.id] = mock_player
+
+    await cog.repeat.callback(cog, ctx_mock, mode="song")
+    mock_player.toggle_repeat_mode.assert_called_once_with("song")
+    assert mock_player.bound_channel == ctx_mock.channel
+    ctx_mock.send.assert_called_once()
+    assert "Current Song" in ctx_mock.send.call_args[0][0]
