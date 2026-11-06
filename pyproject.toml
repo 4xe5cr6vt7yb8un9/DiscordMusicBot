@@ -5,6 +5,7 @@ description = "A modern Python Discord music bot using yt-dlp and discord.py"
 requires-python = ">=3.10"
 dependencies = [
     "discord.py[voice]>=2.4.0",
+    "davey>=0.1.0,<0.2.0",
     "yt-dlp>=2024.1.0",
     "python-dotenv>=1.0.0",
 ]

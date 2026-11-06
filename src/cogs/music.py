@@ -75,6 +75,9 @@ class MusicCog(commands.Cog, name="Music"):
         voice_client: discord.VoiceClient | None = ctx.guild.voice_client
         if voice_client is None:
             voice_client = await target_channel.connect()
+            # Allow voice gateway and encryption handshake to settle
+            import asyncio
+            await asyncio.sleep(0.5)
         elif voice_client.channel != target_channel:
             await voice_client.move_to(target_channel)
 

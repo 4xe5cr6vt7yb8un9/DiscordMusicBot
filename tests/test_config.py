@@ -15,10 +15,12 @@ def test_bot_config_load_success(monkeypatch):
     assert config.ffmpeg_path == "custom_ffmpeg"
     assert config.default_volume == 0.8
 
-def test_bot_config_missing_token_raises_error(monkeypatch):
+def test_bot_config_missing_token_raises_error(monkeypatch, tmp_path):
     monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    empty_env = tmp_path / ".env"
+    empty_env.write_text("")
     with pytest.raises(ConfigurationError) as exc_info:
-        BotConfig.load_from_env()
+        BotConfig.load_from_env(env_path=str(empty_env))
     assert "DISCORD_TOKEN" in str(exc_info.value)
 
 def test_bot_config_defaults(monkeypatch):

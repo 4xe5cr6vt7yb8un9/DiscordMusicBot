@@ -4,11 +4,14 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable, Coroutine
+import logging
 from typing import Any
 import discord
 
 from src.models.song import Song
 from src.services.ytdl import YouTubeExtractor
+
+logger = logging.getLogger(__name__)
 
 class GuildMusicPlayer:
     """Manages audio playback and the track queue for a single Discord guild."""
@@ -29,7 +32,8 @@ class GuildMusicPlayer:
 
         self._queue: deque[Song] = deque()
         self.current_song: Song | None = None
-        self._next_song_event = asyncio.Event()
+        self._queue_item_added = asyncio.Event()
+        self._track_finished = asyncio.Event()
         self._audio_source: discord.PCMVolumeTransformer | None = None
         self._is_stopped = False
         self._player_task: asyncio.Task[None] | None = None
@@ -74,12 +78,13 @@ class GuildMusicPlayer:
         """Add a song to the guild queue."""
         self._ensure_player_task()
         self._queue.append(song)
-        self._next_song_event.set()
+        self._queue_item_added.set()
 
     def pause(self) -> bool:
         """Pause playback if currently playing."""
         if self.voice_client.is_playing() and not self.voice_client.is_paused():
             self.voice_client.pause()
+            logger.info("Paused playback.")
             return True
         return False
 
@@ -87,13 +92,16 @@ class GuildMusicPlayer:
         """Resume playback if currently paused."""
         if self.voice_client.is_paused():
             self.voice_client.resume()
+            logger.info("Resumed playback.")
             return True
         return False
 
     def skip(self) -> bool:
         """Skip the currently playing track."""
         if self.voice_client.is_playing() or self.voice_client.is_paused():
+            logger.info("Skipping track: %s", self.current_song.title if self.current_song else "unknown")
             self.voice_client.stop()
+            self._track_finished.set()
             return True
         return False
 
@@ -103,6 +111,8 @@ class GuildMusicPlayer:
         self.current_song = None
         if self.voice_client.is_playing() or self.voice_client.is_paused():
             self.voice_client.stop()
+        self._track_finished.set()
+        logger.info("Stopped playback and cleared queue.")
 
     def destroy(self) -> None:
         """Clean up tasks and resources."""
@@ -112,31 +122,36 @@ class GuildMusicPlayer:
             self._player_task.cancel()
 
     def _play_next_callback(self, error: Exception | None) -> None:
-        """Callback invoked by discord.py when audio track completes or errors."""
-        self._next_song_event.set()
+        """Callback invoked by discord.py in AudioPlayer worker thread when audio track completes or errors."""
+        if error:
+            logger.error("Audio playback error: %s", error, exc_info=error)
+        else:
+            logger.info("Audio track finished playing successfully.")
+
+        try:
+            loop = self.voice_client.loop
+            loop.call_soon_threadsafe(self._track_finished.set)
+        except Exception:
+            self._track_finished.set()
 
     async def _audio_player_loop(self) -> None:
         """Background loop continuously consuming queued tracks."""
         while not self._is_stopped:
-            self._next_song_event.clear()
-
-            if not self._queue:
+            while not self._queue and not self._is_stopped:
                 self.current_song = None
+                self._queue_item_added.clear()
                 try:
-                    # Wait up to 180 seconds for a new song before disconnecting idle bot
-                    await asyncio.wait_for(self._next_song_event.wait(), timeout=180.0)
+                    await asyncio.wait_for(self._queue_item_added.wait(), timeout=180.0)
                 except asyncio.TimeoutError:
                     if self.on_disconnect and not self._is_stopped:
                         await self.on_disconnect()
-                    break
+                    return
 
             if self._is_stopped:
                 break
 
-            if not self._queue:
-                continue
-
             self.current_song = self._queue.popleft()
+            self._track_finished.clear()
 
             try:
                 self._audio_source = YouTubeExtractor.create_audio_source(
@@ -149,8 +164,8 @@ class GuildMusicPlayer:
                 if self.on_track_start:
                     await self.on_track_start(self.current_song)
 
-            except Exception:
-                self._next_song_event.set()
+            except Exception as err:
+                logger.error("Failed to start playback for %s: %s", self.current_song.title, err, exc_info=True)
+                self._track_finished.set()
 
-            # Wait until track finishes or skip is triggered
-            await self._next_song_event.wait()
+            await self._track_finished.wait()
