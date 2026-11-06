@@ -1,0 +1,156 @@
+"""Per-guild playback controller managing song queue, voice transitions, and audio stream state."""
+from __future__ import annotations
+
+import asyncio
+from collections import deque
+from collections.abc import Callable, Coroutine
+from typing import Any
+import discord
+
+from src.models.song import Song
+from src.services.ytdl import YouTubeExtractor
+
+class GuildMusicPlayer:
+    """Manages audio playback and the track queue for a single Discord guild."""
+
+    def __init__(
+        self,
+        voice_client: discord.VoiceClient,
+        ffmpeg_path: str = "ffmpeg",
+        default_volume: float = 0.5,
+        on_track_start: Callable[[Song], Coroutine[Any, Any, None]] | None = None,
+        on_disconnect: Callable[[], Coroutine[Any, Any, None]] | None = None,
+    ) -> None:
+        self.voice_client = voice_client
+        self.ffmpeg_path = ffmpeg_path
+        self._volume = default_volume
+        self.on_track_start = on_track_start
+        self.on_disconnect = on_disconnect
+
+        self._queue: deque[Song] = deque()
+        self.current_song: Song | None = None
+        self._next_song_event = asyncio.Event()
+        self._audio_source: discord.PCMVolumeTransformer | None = None
+        self._is_stopped = False
+        self._player_task: asyncio.Task[None] | None = None
+        self._ensure_player_task()
+
+    def _ensure_player_task(self) -> None:
+        """Ensure background playback loop is running."""
+        if (self._player_task is None or self._player_task.done()) and not self._is_stopped:
+            try:
+                loop = asyncio.get_running_loop()
+                self._player_task = loop.create_task(self._audio_player_loop())
+            except RuntimeError:
+                self._player_task = None
+
+    @property
+    def queue(self) -> list[Song]:
+        """Return a snapshot of upcoming tracks in the queue."""
+        return list(self._queue)
+
+    @property
+    def volume(self) -> float:
+        """Current volume level between 0.0 and 2.0."""
+        return self._volume
+
+    @property
+    def is_playing(self) -> bool:
+        """Check if audio is currently playing in voice channel."""
+        return self.voice_client.is_playing()
+
+    @property
+    def is_paused(self) -> bool:
+        """Check if audio is currently paused in voice channel."""
+        return self.voice_client.is_paused()
+
+    def set_volume(self, volume: float) -> None:
+        """Set playback volume (clamped between 0.0 and 2.0)."""
+        self._volume = max(0.0, min(volume, 2.0))
+        if self._audio_source is not None:
+            self._audio_source.volume = self._volume
+
+    async def enqueue(self, song: Song) -> None:
+        """Add a song to the guild queue."""
+        self._ensure_player_task()
+        self._queue.append(song)
+        self._next_song_event.set()
+
+    def pause(self) -> bool:
+        """Pause playback if currently playing."""
+        if self.voice_client.is_playing() and not self.voice_client.is_paused():
+            self.voice_client.pause()
+            return True
+        return False
+
+    def resume(self) -> bool:
+        """Resume playback if currently paused."""
+        if self.voice_client.is_paused():
+            self.voice_client.resume()
+            return True
+        return False
+
+    def skip(self) -> bool:
+        """Skip the currently playing track."""
+        if self.voice_client.is_playing() or self.voice_client.is_paused():
+            self.voice_client.stop()
+            return True
+        return False
+
+    def stop(self) -> None:
+        """Stop playback and clear all queued tracks."""
+        self._queue.clear()
+        self.current_song = None
+        if self.voice_client.is_playing() or self.voice_client.is_paused():
+            self.voice_client.stop()
+
+    def destroy(self) -> None:
+        """Clean up tasks and resources."""
+        self._is_stopped = True
+        self.stop()
+        if self._player_task and not self._player_task.done():
+            self._player_task.cancel()
+
+    def _play_next_callback(self, error: Exception | None) -> None:
+        """Callback invoked by discord.py when audio track completes or errors."""
+        self._next_song_event.set()
+
+    async def _audio_player_loop(self) -> None:
+        """Background loop continuously consuming queued tracks."""
+        while not self._is_stopped:
+            self._next_song_event.clear()
+
+            if not self._queue:
+                self.current_song = None
+                try:
+                    # Wait up to 180 seconds for a new song before disconnecting idle bot
+                    await asyncio.wait_for(self._next_song_event.wait(), timeout=180.0)
+                except asyncio.TimeoutError:
+                    if self.on_disconnect and not self._is_stopped:
+                        await self.on_disconnect()
+                    break
+
+            if self._is_stopped:
+                break
+
+            if not self._queue:
+                continue
+
+            self.current_song = self._queue.popleft()
+
+            try:
+                self._audio_source = YouTubeExtractor.create_audio_source(
+                    self.current_song.stream_url,
+                    ffmpeg_path=self.ffmpeg_path,
+                    volume=self._volume,
+                )
+                self.voice_client.play(self._audio_source, after=self._play_next_callback)
+
+                if self.on_track_start:
+                    await self.on_track_start(self.current_song)
+
+            except Exception:
+                self._next_song_event.set()
+
+            # Wait until track finishes or skip is triggered
+            await self._next_song_event.wait()
