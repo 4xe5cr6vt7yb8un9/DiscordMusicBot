@@ -61,6 +61,42 @@ A modern, high-performance Discord music bot built with **Python 3.10+**, **disc
    pytest
    ```
 
+## Running with Docker
+
+### Using Docker Compose (Recommended)
+
+1. Make sure your `.env` file is configured with your `DISCORD_TOKEN`.
+2. Start the container in detached mode:
+   ```bash
+   docker compose up -d --build
+   ```
+3. View container logs:
+   ```bash
+   docker compose logs -f
+   ```
+4. Stop the bot:
+   ```bash
+   docker compose down
+   ```
+
+### Using Plain Docker
+
+1. Build the image:
+   ```bash
+   docker build -t discord-music-bot:latest .
+   ```
+2. Run the container:
+   ```bash
+   docker run -d --name discord-music-bot --restart unless-stopped --env-file .env discord-music-bot:latest
+   ```
+
+## CI/CD Workflow
+
+The repository includes a GitHub Actions workflow in `.github/workflows/docker-build.yml` that:
+- Runs `pytest` on Python 3.12 with all system dependencies (`ffmpeg`, `libopus0`).
+- Automatically builds and pushes multi-platform Docker images to **GitHub Container Registry (`ghcr.io`)** on every push to `main`/`master` or new tag release (`v*.*.*`).
+- Validates Docker image builds without pushing on Pull Requests.
+
 ## Available Commands
 
 | Command | Slash Command | Description |
