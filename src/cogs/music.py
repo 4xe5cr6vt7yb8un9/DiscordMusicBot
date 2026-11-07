@@ -26,6 +26,41 @@ class MusicCog(commands.Cog, name="Music"):
         self.extractor = YouTubeExtractor()
         self.players: dict[int, GuildMusicPlayer] = {}
 
+    async def send_response(
+        self,
+        ctx: Context,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+    ) -> discord.Message | None:
+        """Send a response, replacing the deferred thinking message if in a deferred interaction."""
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is not None:
+            if interaction.response.is_done():
+                kwargs: dict[str, Any] = {}
+                if content is not None:
+                    kwargs["content"] = content
+                if embed is not None:
+                    kwargs["embed"] = embed
+                try:
+                    return await interaction.edit_original_response(**kwargs)
+                except Exception as err:
+                    logger.debug("edit_original_response failed, falling back to followup: %s", err)
+                    return await interaction.followup.send(content=content, embed=embed)
+            else:
+                if embed is not None and content is not None:
+                    return await ctx.send(content, embed=embed)
+                elif embed is not None:
+                    return await ctx.send(embed=embed)
+                else:
+                    return await ctx.send(content)
+        else:
+            if embed is not None and content is not None:
+                return await ctx.send(content, embed=embed)
+            elif embed is not None:
+                return await ctx.send(embed=embed)
+            else:
+                return await ctx.send(content)
+
     def get_player(self, ctx: Context, voice_client: discord.VoiceClient) -> GuildMusicPlayer:
         """Retrieve or instantiate a GuildMusicPlayer for the given guild."""
         guild_id = ctx.guild.id
@@ -79,13 +114,32 @@ class MusicCog(commands.Cog, name="Music"):
                 await player.voice_client.disconnect()
 
     @commands.hybrid_command(name="play", description="Play audio from a YouTube URL or search query.")
-    async def play(self, ctx: Context, *, query: str) -> None:
+    async def play(self, ctx: Context, *, query: str | None = None) -> None:
         """Connects to user's VC and plays or queues YouTube audio."""
         if not ctx.author.voice or not ctx.author.voice.channel:
-            await ctx.send("❌ You must be in a voice channel to use the play command.")
+            await self.send_response(ctx, "❌ You must be in a voice channel to use the play command.")
             return
 
         target_channel = ctx.author.voice.channel
+
+        player = self.players.get(ctx.guild.id)
+        if player:
+            player.bound_channel = ctx.channel
+
+        # Support play with no query: resume if paused, or show current track
+        if not query or not query.strip():
+            if player and player.is_paused:
+                player.resume()
+                await self.send_response(ctx, "▶️ Playback resumed.")
+                return
+            elif player and (player.is_playing or player.current_song is not None):
+                embed = player.current_song.create_embed(status="Currently Playing")
+                await self.send_response(ctx, embed=embed)
+                return
+            else:
+                await self.send_response(ctx, "❌ Please provide a song name or YouTube link to play. Example: `!play never gonna give you up`")
+                return
+
         await ctx.defer()
 
         # Connect or move to voice channel
@@ -98,75 +152,80 @@ class MusicCog(commands.Cog, name="Music"):
             await voice_client.move_to(target_channel)
 
         try:
-            song = await self.extractor.extract_song(query, ctx.author)
+            song = await self.extractor.extract_song(query.strip(), ctx.author)
         except AudioExtractionError as err:
-            await ctx.send(f"❌ Could not extract audio: {err}")
+            await self.send_response(ctx, f"❌ Could not extract audio: {err}")
             return
         except Exception as err:
             logger.error("Unexpected error extracting song '%s': %s", query, err, exc_info=True)
-            await ctx.send(f"❌ An unexpected error occurred while preparing audio: {err}")
+            await self.send_response(ctx, f"❌ An unexpected error occurred while preparing audio: {err}")
             return
 
         player = self.get_player(ctx, voice_client)
         player.bound_channel = ctx.channel
         is_currently_playing = player.is_playing or player.current_song is not None
-        await player.enqueue(song)
 
         if is_currently_playing:
+            await player.enqueue(song)
             embed = song.create_embed(status="Added to Queue")
-            await ctx.send(embed=embed)
+            await self.send_response(ctx, embed=embed)
+        else:
+            player.last_announced_url = song.webpage_url
+            await player.enqueue(song)
+            embed = song.create_embed(status="Now Playing")
+            await self.send_response(ctx, embed=embed)
 
     @commands.hybrid_command(name="pause", description="Pause currently playing music.")
     async def pause(self, ctx: Context) -> None:
         """Pause playback."""
         player = self.players.get(ctx.guild.id)
         if not player or not player.is_playing:
-            await ctx.send("❌ Nothing is currently playing.")
+            await self.send_response(ctx, "❌ Nothing is currently playing.")
             return
 
         player.bound_channel = ctx.channel
         if player.pause():
-            await ctx.send("⏸️ Playback paused.")
+            await self.send_response(ctx, "⏸️ Playback paused.")
         else:
-            await ctx.send("❌ Could not pause.")
+            await self.send_response(ctx, "❌ Could not pause.")
 
     @commands.hybrid_command(name="resume", description="Resume paused music.")
     async def resume(self, ctx: Context) -> None:
         """Resume paused playback."""
         player = self.players.get(ctx.guild.id)
         if not player or not player.is_paused:
-            await ctx.send("❌ Audio is not currently paused.")
+            await self.send_response(ctx, "❌ Audio is not currently paused.")
             return
 
         player.bound_channel = ctx.channel
         if player.resume():
-            await ctx.send("▶️ Playback resumed.")
+            await self.send_response(ctx, "▶️ Playback resumed.")
         else:
-            await ctx.send("❌ Could not resume.")
+            await self.send_response(ctx, "❌ Could not resume.")
 
     @commands.hybrid_command(name="skip", description="Skip currently playing track.")
     async def skip(self, ctx: Context) -> None:
         """Skip current track."""
         player = self.players.get(ctx.guild.id)
         if not player or (not player.is_playing and not player.is_paused):
-            await ctx.send("❌ Nothing is currently playing to skip.")
+            await self.send_response(ctx, "❌ Nothing is currently playing to skip.")
             return
 
         player.bound_channel = ctx.channel
         player.skip()
-        await ctx.send("⏭️ Skipped current track.")
+        await self.send_response(ctx, "⏭️ Skipped current track.")
 
     @commands.hybrid_command(name="stop", description="Stop music and clear queue.")
     async def stop(self, ctx: Context) -> None:
         """Stop audio and clear queue."""
         player = self.players.get(ctx.guild.id)
         if not player:
-            await ctx.send("❌ Bot is not playing music.")
+            await self.send_response(ctx, "❌ Bot is not playing music.")
             return
 
         player.bound_channel = ctx.channel
         player.stop()
-        await ctx.send("⏹️ Stopped playback and cleared queue.")
+        await self.send_response(ctx, "⏹️ Stopped playback and cleared queue.")
 
     @commands.hybrid_command(
         name="repeat",
@@ -177,29 +236,29 @@ class MusicCog(commands.Cog, name="Music"):
         """Toggle or set repeating for the current song or entire queue."""
         player = self.players.get(ctx.guild.id)
         if not player:
-            await ctx.send("❌ Bot is not active in a voice channel.")
+            await self.send_response(ctx, "❌ Bot is not active in a voice channel.")
             return
 
         player.bound_channel = ctx.channel
         try:
             new_mode = player.toggle_repeat_mode(mode)
         except ValueError as err:
-            await ctx.send(f"❌ {err}")
+            await self.send_response(ctx, f"❌ {err}")
             return
 
         if new_mode == RepeatMode.SONG:
-            await ctx.send("🔂 Repeat mode set to: **Current Song** (looping this song).")
+            await self.send_response(ctx, "🔂 Repeat mode set to: **Current Song** (looping this song).")
         elif new_mode == RepeatMode.QUEUE:
-            await ctx.send("🔁 Repeat mode set to: **Entire Queue** (looping all songs).")
+            await self.send_response(ctx, "🔁 Repeat mode set to: **Entire Queue** (looping all songs).")
         else:
-            await ctx.send("➡️ Repeat mode set to: **Off**.")
+            await self.send_response(ctx, "➡️ Repeat mode set to: **Off**.")
 
     @commands.hybrid_command(name="queue", description="Display currently queued songs.")
     async def queue(self, ctx: Context) -> None:
         """List upcoming tracks."""
         player = self.players.get(ctx.guild.id)
         if not player or (player.current_song is None and not player.queue):
-            await ctx.send("📭 The queue is currently empty.")
+            await self.send_response(ctx, "📭 The queue is currently empty.")
             return
 
         player.bound_channel = ctx.channel
@@ -221,55 +280,55 @@ class MusicCog(commands.Cog, name="Music"):
             color=discord.Color.gold(),
         )
         embed.set_footer(text=f"Repeat: {player.repeat_mode.value.capitalize()} • Volume: {int(player.volume * 100)}%")
-        await ctx.send(embed=embed)
+        await self.send_response(ctx, embed=embed)
 
     @commands.hybrid_command(name="nowplaying", aliases=["np"], description="Show information about the current song.")
     async def nowplaying(self, ctx: Context) -> None:
         """Show current song embed."""
         player = self.players.get(ctx.guild.id)
         if not player or player.current_song is None:
-            await ctx.send("❌ Nothing is currently playing.")
+            await self.send_response(ctx, "❌ Nothing is currently playing.")
             return
 
         player.bound_channel = ctx.channel
-        await ctx.send(embed=player.current_song.create_embed(status="Now Playing"))
+        await self.send_response(ctx, embed=player.current_song.create_embed(status="Now Playing"))
 
     @commands.hybrid_command(name="volume", description="Adjust playback volume (1-150%).")
     async def volume(self, ctx: Context, percent: int) -> None:
         """Adjust volume."""
         if percent < 1 or percent > 150:
-            await ctx.send("❌ Please provide a volume between 1 and 150.")
+            await self.send_response(ctx, "❌ Please provide a volume between 1 and 150.")
             return
 
         player = self.players.get(ctx.guild.id)
         if not player:
-            await ctx.send("❌ Bot is not currently active in a voice channel.")
+            await self.send_response(ctx, "❌ Bot is not currently active in a voice channel.")
             return
 
         player.bound_channel = ctx.channel
         player.set_volume(percent / 100.0)
-        await ctx.send(f"🔊 Volume set to {percent}%.")
+        await self.send_response(ctx, f"🔊 Volume set to {percent}%.")
 
     @commands.hybrid_command(name="leave", aliases=["dc", "disconnect"], description="Disconnect from voice channel.")
     async def leave(self, ctx: Context) -> None:
         """Leave voice channel."""
         if ctx.guild.voice_client is None:
-            await ctx.send("❌ Bot is not in a voice channel.")
+            await self.send_response(ctx, "❌ Bot is not in a voice channel.")
             return
 
         await self.cleanup_player(ctx.guild.id)
-        await ctx.send("👋 Disconnected from voice channel.")
+        await self.send_response(ctx, "👋 Disconnected from voice channel.")
 
     async def cog_command_error(self, ctx: Context, error: Exception) -> None:
         """Handle errors raised during cog command execution and respond to user."""
         logger.error("Error executing command '%s': %s", ctx.command, error, exc_info=error)
         if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(f"❌ Missing argument: `{error.param.name}`. Use `{self.config.prefix}help {ctx.command}` for usage.")
+            await self.send_response(ctx, f"❌ Missing argument: `{error.param.name}`. Use `{self.config.prefix}help {ctx.command}` for usage.")
         elif isinstance(error, commands.BadArgument):
-            await ctx.send(f"❌ Invalid argument: {error}")
+            await self.send_response(ctx, f"❌ Invalid argument: {error}")
         else:
             orig_error = getattr(error, "original", error)
-            await ctx.send(f"❌ An error occurred: {orig_error}")
+            await self.send_response(ctx, f"❌ An error occurred: {orig_error}")
 
 
 async def setup(bot: commands.Bot) -> None:

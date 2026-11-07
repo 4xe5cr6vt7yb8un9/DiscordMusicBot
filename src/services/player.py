@@ -37,6 +37,7 @@ class GuildMusicPlayer:
         self.repeat_mode: RepeatMode = RepeatMode.OFF
         self._skip_requested: bool = False
         self._last_error: Exception | None = None
+        self.last_announced_url: str | None = None
 
         self._queue: deque[Song] = deque()
         self.current_song: Song | None = None
@@ -142,6 +143,7 @@ class GuildMusicPlayer:
         self._queue.clear()
         self.current_song = None
         self._skip_requested = False
+        self.last_announced_url = None
         if self.voice_client.is_playing() or self.voice_client.is_paused():
             self.voice_client.stop()
         self._track_finished.set()
@@ -184,6 +186,13 @@ class GuildMusicPlayer:
             if self._is_stopped:
                 break
 
+            # If voice client is still actively playing, wait for it to fully stop before starting next track
+            while self.voice_client.is_playing() and not self._is_stopped:
+                await asyncio.sleep(0.1)
+
+            if self._is_stopped:
+                break
+
             self.current_song = self._queue.popleft()
             self._track_finished.clear()
             self._last_error = None
@@ -196,7 +205,8 @@ class GuildMusicPlayer:
                 )
                 self.voice_client.play(self._audio_source, after=self._play_next_callback)
 
-                if self.on_track_start:
+                if self.on_track_start and self.last_announced_url != self.current_song.webpage_url:
+                    self.last_announced_url = self.current_song.webpage_url
                     await self.on_track_start(self.current_song)
 
             except Exception as err:
@@ -207,7 +217,7 @@ class GuildMusicPlayer:
             await self._track_finished.wait()
 
             # If an error occurred (either at startup or during playback), notify user
-            if self._last_error and self.on_error and self.current_song:
+            if self._last_error and not self._skip_requested and self.on_error and self.current_song:
                 try:
                     await self.on_error(self.current_song, self._last_error)
                 except Exception as callback_err:

@@ -114,3 +114,88 @@ async def test_repeat_command(bot_mock, config_mock, ctx_mock):
     assert mock_player.bound_channel == ctx_mock.channel
     ctx_mock.send.assert_called_once()
     assert "Current Song" in ctx_mock.send.call_args[0][0]
+
+@pytest.mark.asyncio
+async def test_send_response_replaces_deferred_interaction(bot_mock, config_mock, ctx_mock):
+    cog = MusicCog(bot_mock, config_mock)
+    mock_interaction = MagicMock()
+    mock_interaction.response.is_done.return_value = True
+    mock_interaction.edit_original_response = AsyncMock()
+    ctx_mock.interaction = mock_interaction
+
+    embed = discord.Embed(title="Test")
+    await cog.send_response(ctx_mock, embed=embed)
+    mock_interaction.edit_original_response.assert_called_once_with(embed=embed)
+    ctx_mock.send.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_play_command_when_nothing_playing_announces_now_playing(bot_mock, config_mock, ctx_mock):
+    cog = MusicCog(bot_mock, config_mock)
+    mock_vc = MagicMock(spec=discord.VoiceClient)
+    ctx_mock.author.voice.channel.connect = AsyncMock(return_value=mock_vc)
+
+    mock_song = Song(
+        title="First Song",
+        webpage_url="https://youtube.com/watch?v=first",
+        stream_url="https://stream.url/first",
+        duration=200,
+        uploader="Artist",
+        thumbnail_url=None,
+        requester_name="Author",
+        requester_id=1,
+    )
+
+    with patch.object(cog.extractor, "extract_song", new_callable=AsyncMock, return_value=mock_song), \
+         patch("src.cogs.music.GuildMusicPlayer") as mock_player_cls:
+
+        mock_player_instance = MagicMock()
+        mock_player_instance.enqueue = AsyncMock()
+        mock_player_instance.is_playing = False
+        mock_player_instance.current_song = None
+        mock_player_cls.return_value = mock_player_instance
+
+        await cog.play.callback(cog, ctx_mock, query="https://youtube.com/watch?v=first")
+
+        assert mock_player_instance.last_announced_url == mock_song.webpage_url
+        mock_player_instance.enqueue.assert_called_once_with(mock_song)
+        ctx_mock.send.assert_called_once()
+        _, kwargs = ctx_mock.send.call_args
+        assert "embed" in kwargs
+        assert kwargs["embed"].title == "🎵 Now Playing"
+
+@pytest.mark.asyncio
+async def test_play_command_empty_query_resumes_if_paused(bot_mock, config_mock, ctx_mock):
+    cog = MusicCog(bot_mock, config_mock)
+    mock_player = MagicMock()
+    mock_player.is_paused = True
+    mock_player.resume.return_value = True
+    cog.players[ctx_mock.guild.id] = mock_player
+
+    await cog.play.callback(cog, ctx_mock, query=None)
+    mock_player.resume.assert_called_once()
+    ctx_mock.send.assert_called_once()
+    assert "Playback resumed" in ctx_mock.send.call_args[0][0]
+
+@pytest.mark.asyncio
+async def test_play_command_empty_query_shows_info_if_playing(bot_mock, config_mock, ctx_mock):
+    cog = MusicCog(bot_mock, config_mock)
+    mock_player = MagicMock()
+    mock_player.is_paused = False
+    mock_player.is_playing = True
+    mock_player.current_song = Song(
+        title="Playing Song",
+        webpage_url="https://youtube.com/watch?v=now",
+        stream_url="https://stream.url",
+        duration=180,
+        uploader="Artist",
+        thumbnail_url=None,
+        requester_name="Author",
+        requester_id=1,
+    )
+    cog.players[ctx_mock.guild.id] = mock_player
+
+    await cog.play.callback(cog, ctx_mock, query="")
+    ctx_mock.send.assert_called_once()
+    _, kwargs = ctx_mock.send.call_args
+    assert "embed" in kwargs
+    assert kwargs["embed"].title == "🎵 Currently Playing"

@@ -47,6 +47,12 @@ class MusicBot(commands.Bot):
         if user:
             logger.info("Logged in as %s (ID: %s)", user.name, user.id)
             logger.info("Connected to %d guild(s).", len(self.guilds))
+            try:
+                synced = await self.tree.sync()
+                logger.info("Successfully synced %d application command(s).", len(synced))
+            except Exception as err:
+                logger.error("Failed to sync application commands: %s", err)
+
             await self.change_presence(
                 activity=discord.Activity(
                     type=discord.ActivityType.listening,
